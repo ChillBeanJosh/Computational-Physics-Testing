@@ -17,7 +17,6 @@ public static class MatrixUtils
         }
         return result;
     }
-    //----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
     // Element-wise subtraction of two vectors
     public static float[] Subtract(float[] a, float[] b)
@@ -64,7 +63,6 @@ public static class MatrixUtils
         return result;
     }
 
-    //----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
     // Multiply 2D Matrix with Vector:
     public static float[] Multiply(float[,] matrix, float[] vector)
     {
@@ -87,7 +85,6 @@ public static class MatrixUtils
         return result;
     }
 
-    //----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
     // Element-wise multiplication of vector by scalar
     public static float[] Multiply(float[] vector, float scalar)
     {
@@ -126,98 +123,75 @@ public static class MatrixUtils
     //----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
     // Solve K * u = f with fixed constraints (displacement zero)
     // Uses naive Gauss-Seidel-like iteration for small systems
-    public static float[] SolveSystem(float[,] K, float[] f, List<MassPoint> masses, int maxIterations = 100)
+    public static float[] SolveSystem(float[,] K, float[] f, List<MassPoint> masses)
     {
-        //Initialization for displacement matrix {mass_i * displacement}:
-        int n = f.Length;
-        float[] u = new float[n];
+        int totalDOF = f.Length;
+        int dofPerNode = Mathf.FloorToInt((float)totalDOF / masses.Count);
 
-        // Initialize u to zeros (fixed nodes are zero displacement)
-        for (int i = 0; i < n; i++)
-            u[i] = masses[i].isFixed ? 0f : 0f;
+        // Clone to avoid modifying original
+        float[,] Kmod = (float[,])K.Clone();
+        float[] fmod = (float[])f.Clone();
 
-        // Simple iterative solver (Gauss-Seidel)
-        for (int iter = 0; iter < maxIterations; iter++)
+        // Apply boundary (fixed) conditions
+        for (int i = 0; i < masses.Count; i++)
         {
-            for (int i = 0; i < n; i++)
+            if (masses[i].isFixed)
             {
-                //If the Current Mass is Fixed (Cannot Move) -> No Displacement:
-                if (masses[i].isFixed)
+                for (int d = 0; d < dofPerNode; d++)
                 {
-                    u[i] = 0f;
-                    continue;
-                }
-
-                //Diagonal Matrix of Stiffness Matrix:
-                float diag = K[i, i];
-
-                //Sum of External Forces acting on the masses:
-                float sum = f[i];
-
-                for (int j = 0; j < n; j++)
-                {
-                    //If You Are Not On Self:
-                    if (j != i)
+                    int idx = i * dofPerNode + d;
+                    for (int j = 0; j < totalDOF; j++)
                     {
-                        //Subtract Other From Self:
-                        //K[i, j] == stiffness coupling between mass i and mass j.
-                        //u[j] == displacement of node j.
-                        ///K[i, j] * u[j] == the force contribution on node i due to displacement of node j.
-                        //Subtract from Sum == because in equilibrium, total force = 0 ? external = internal.
-                        sum -= K[i, j] * u[j];
+                        Kmod[idx, j] = 0f;
+                        Kmod[j, idx] = 0f;
                     }
+                    Kmod[idx, idx] = 1f;
+                    fmod[idx] = 0f;
                 }
-
-                //Isolates Unknown Displacement:
-                u[i] = sum / diag;
             }
         }
 
-        //Return The Newly Calculated Matrix:
-        return u;
+        return GaussianElimination(Kmod, fmod);
     }
 
     //----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-    // Gaussian elimination solver for small linear system A x = b
+    // Gaussian elimination solver for A*x=b
     public static float[] GaussianElimination(float[,] A, float[] b)
     {
         int n = b.Length;
-        float[,] mat = new float[n, n];
-        float[] vec = new float[n];
-
-        // Copy inputs
-        System.Array.Copy(b, vec, n);
-        for (int i = 0; i < n; i++)
-            for (int j = 0; j < n; j++)
-                mat[i, j] = A[i, j];
+        float[,] mat = (float[,])A.Clone();
+        float[] vec = (float[])b.Clone();
 
         // Forward elimination
         for (int k = 0; k < n; k++)
         {
-            float max = Mathf.Abs(mat[k, k]);
+            // Find pivot
             int maxRow = k;
+            float maxVal = Mathf.Abs(mat[k, k]);
             for (int i = k + 1; i < n; i++)
             {
-                if (Mathf.Abs(mat[i, k]) > max)
+                if (Mathf.Abs(mat[i, k]) > maxVal)
                 {
-                    max = Mathf.Abs(mat[i, k]);
+                    maxVal = Mathf.Abs(mat[i, k]);
                     maxRow = i;
                 }
             }
 
+            // Swap rows if needed
             if (maxRow != k)
             {
                 for (int j = 0; j < n; j++)
                 {
-                    float tmp = mat[k, j];
+                    float temp = mat[k, j];
                     mat[k, j] = mat[maxRow, j];
-                    mat[maxRow, j] = tmp;
+                    mat[maxRow, j] = temp;
                 }
                 float tmpB = vec[k];
                 vec[k] = vec[maxRow];
                 vec[maxRow] = tmpB;
             }
 
+            // Eliminate
             for (int i = k + 1; i < n; i++)
             {
                 float c = mat[i, k] / mat[k, k];
@@ -238,16 +212,13 @@ public static class MatrixUtils
         }
         return x;
     }
-
-    // Create a diagonal matrix from a vector
+    //----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    // Create diagonal matrix
     public static float[,] CreateDiagonalMatrix(float[] diag)
     {
         int n = diag.Length;
         float[,] result = new float[n, n];
-
-        for (int i = 0; i < n; i++)
-            result[i, i] = diag[i];
-
+        for (int i = 0; i < n; i++) result[i, i] = diag[i];
         return result;
     }
 }
