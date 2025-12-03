@@ -1,6 +1,5 @@
 ﻿using System.Collections.Generic;
 using UnityEngine;
-using static UnityEditor.Experimental.GraphView.GraphView;
 
 public class SpringMassSystem : MonoBehaviour
 {
@@ -10,45 +9,50 @@ public class SpringMassSystem : MonoBehaviour
     [Space]
 
     [Header("Simulation Parameters")]
-    public float globalMassValue;
+    public float globalMassValue = 5f;
     [Space]
-    public int gridWidth;
-    public int gridHeight;
-    public float gridSpacing;
+    public int gridWidth = 5;
+    public int gridHeight = 5;
+    public float gridSpacing = 0.5f;
     [Space]
-    [Range(0f, 2f)] public float dampingRatio;
+    [Range(0f, 2f)] public float dampingRatio = 0.1f;
     public Vector3 gravity = new Vector3(0, -9.81f, 0);
-    public float timeStep;
+    public float timeStep = 0.001f;
     [Space]
 
     [Header("Collision Parameters")]
     public LayerMask collisionLayerMask;
-    public float collisionRadius;
-    [Range(0f, 1f)] public float restitution;      // Bounce factor
-    [Range(0f, 1f)] public float friction;         // Friction factor
+    public float collisionRadius = 0.06f;
+    [Range(0f, 1f)] public float restitution = 0.7f;
+    [Range(0f, 1f)] public float friction = 0.5f;
     [Space]
 
     [Header("SPH Parameters")]
-    public float restDensity;   // ρ0
-    public float pressureStiffness; // k in P = k(ρ-ρ0)
-    [Range(0f, 1f)] public float viscosity;      // μ
-    public float globalSmoothingRadius; // h (used by all particles)
+    public float restDensity = 1000f;          // ρ0
+    public float pressureStiffness = 10f;      // k in P = k(ρ-ρ0)
+    [Range(0f, 1f)] public float viscosity = 0.1f;
+    public float globalSmoothingRadius = 1.2f; // h
+    [Space]
+    public int preSolveIterations = 50;
+    public float preSolveDamping = 0.25f;
     [Space]
 
     [Header("Boundary Particle Parameters")]
-    public int BoundaryLayers;
-    public float BoundaryMassMultiplier;
-    public float BoundaryDensityMultiplier;
+    public int BoundaryLayers = 3;
+    public float BoundaryMassMultiplier = 10f;
+    public float BoundaryDensityMultiplier = 50f;
+    [Range(0.2f, 1.0f)] public float boundarySpacingFactor = 0.5f; // spacing = h * factor
     [Space]
+
+    [Header("Boundary Options")]
+    public bool enableTopWall = false; // false = open top container
 
     [Header("Background Heatmap")]
     public bool debugDrawBackground = true;
-    [Space]
-    public Color backgroundLowColor;
-    public Color backgroundMidColor;
-    public Color backgroundHighColor;
-    [Space]
-    [Range(10, 200)] public int backgroundResolution = 60;   // number of samples horizontally
+    public Color backgroundLowColor = Color.blue;
+    public Color backgroundMidColor = Color.white;
+    public Color backgroundHighColor = Color.red;
+    [Range(10, 200)] public int backgroundResolution = 60;
     [Space]
 
     [Header("Springs Toggle")]
@@ -57,61 +61,66 @@ public class SpringMassSystem : MonoBehaviour
 
     [Header("Debug")]
     public bool showDebug = true;
-    [Space]
     public bool debugColorByDensity = true;
     public bool debugDrawSmoothingRadius = true;
     public bool debugDrawSPHForces = true;
-    [Space]
-    [Range(0.0005f, 0.002f)] public float debugForceScale;
-    public float debugMinDensity;
-    public float debugMaxDensity;
+    [Range(0.0005f, 0.002f)] public float debugForceScale = 0.0012f;
+    public float debugMinDensity = 800f;
+    public float debugMaxDensity = 1200f;
+
+    // ======================================================================
+    // LIFECYCLE
+    // ======================================================================
 
     void Start()
     {
         if (gridWidth > 0 && gridHeight > 0)
-        {
             GenerateMassGrid();
-        }
 
-        foreach (var m in masses)
+        // Initialize basic mass properties
+        for (int i = 0; i < masses.Count; i++)
         {
+            var m = masses[i];
             m.mass = globalMassValue;
             m.smoothingRadius = globalSmoothingRadius;
-
             m.isFixed = false;
-
             m.isBoundary = false;
             m.boundaryVolume = 0f;
+            masses[i] = m;
         }
 
         GenerateBoundaryParticles();
-
         PrecomputeBoundaryVolumes();
 
         InitializeRestLengths();
+
+        PreStabilizationRelaxation();
     }
 
     void FixedUpdate()
     {
-        //1.) SPH Density & Pressure:
+        // 1) SPH density & pressure
         ComputeDensities();
         ComputePressures();
 
-        //2.) External Forces (Gravity):
+        // 2) External (gravity)
         ApplyExternalForces();
 
-        //3.) Spring Forces:
+        // 3) Springs
         if (useSprings) ApplySpringForces();
 
-        //4.) SPH Internal Forces:
+        // 4) SPH internal forces
         ApplySPHPressureForces();
         ApplySPHViscosityForces();
 
-        //5.) Integrate Motion:
+        // 5) Integrate motion
         Integrate();
     }
 
-    // ----------------------------------------------------------------------
+    // ======================================================================
+    // GRID GENERATION
+    // ======================================================================
+
     void GenerateMassGrid()
     {
         masses.Clear();
@@ -120,7 +129,7 @@ public class SpringMassSystem : MonoBehaviour
         int count = gridWidth * gridHeight;
         masses = new List<MassPoint>(count);
 
-        // 1) Create masses
+        // 1) Create fluid masses
         for (int y = 0; y < gridHeight; y++)
         {
             for (int x = 0; x < gridWidth; x++)
@@ -129,7 +138,7 @@ public class SpringMassSystem : MonoBehaviour
                 {
                     mass = globalMassValue,
                     density = restDensity,
-                    pressure = 0,
+                    pressure = 0f,
                     position = new Vector3(x * gridSpacing, y * gridSpacing, 0f),
                     velocity = Vector3.zero,
                     force = Vector3.zero,
@@ -144,7 +153,7 @@ public class SpringMassSystem : MonoBehaviour
             }
         }
 
-        // 2) Connect grid with springs if spring simulation is toggled on
+        // 2) Connect grid with springs (optional)
         if (useSprings)
         {
             for (int y = 0; y < gridHeight; y++)
@@ -173,7 +182,7 @@ public class SpringMassSystem : MonoBehaviour
                             damping = 1f
                         });
 
-                    // Optional diagonals for a stiffer grid
+                    // Diagonals for stiffness
                     if (x < gridWidth - 1 && y < gridHeight - 1)
                     {
                         springs.Add(new SpringElement
@@ -197,28 +206,31 @@ public class SpringMassSystem : MonoBehaviour
         }
     }
 
-    // ----------------------------------------------------------------------
+    // ======================================================================
+    // BOUNDARY GENERATION (AKINCI STYLE)
+    // ======================================================================
+
     void GenerateBoundaryParticles()
     {
         float h = globalSmoothingRadius;
-        float spacing = h * 0.3f;
+        float spacing = h * boundarySpacingFactor;
 
-        // Determine fluid bounds from generated grid
+        // Container bounds in fluid coordinates
         float minX = 0f;
         float maxX = (gridWidth - 1) * gridSpacing;
-
         float minY = 0f;
         float maxY = (gridHeight - 1) * gridSpacing;
 
         List<MassPoint> boundary = new List<MassPoint>();
 
-        // TOP WALL
-        for (int l = 0; l < BoundaryLayers; l++)
+        // TOP WALL (only if enabledTopWall == true)
+        if (enableTopWall)
         {
-            float y = maxY + (l + 1) * spacing;
-            for (float x = minX - spacing; x <= maxX + spacing; x += spacing)
+            for (int l = 0; l < BoundaryLayers; l++)
             {
-                boundary.Add(NewBoundaryParticle(new Vector3(x, y, 0)));
+                float y = maxY + (l + 1) * spacing;
+                for (float x = minX - spacing; x <= maxX + spacing; x += spacing)
+                    boundary.Add(NewBoundaryParticle(new Vector3(x, y, 0f)));
             }
         }
 
@@ -227,9 +239,7 @@ public class SpringMassSystem : MonoBehaviour
         {
             float y = minY - (l + 1) * spacing;
             for (float x = minX - spacing; x <= maxX + spacing; x += spacing)
-            {
-                boundary.Add(NewBoundaryParticle(new Vector3(x, y, 0)));
-            }
+                boundary.Add(NewBoundaryParticle(new Vector3(x, y, 0f)));
         }
 
         // LEFT WALL
@@ -237,9 +247,7 @@ public class SpringMassSystem : MonoBehaviour
         {
             float x = minX - (l + 1) * spacing;
             for (float y = minY - spacing; y <= maxY + spacing; y += spacing)
-            {
-                boundary.Add(NewBoundaryParticle(new Vector3(x, y, 0)));
-            }
+                boundary.Add(NewBoundaryParticle(new Vector3(x, y, 0f)));
         }
 
         // RIGHT WALL
@@ -247,12 +255,9 @@ public class SpringMassSystem : MonoBehaviour
         {
             float x = maxX + (l + 1) * spacing;
             for (float y = minY - spacing; y <= maxY + spacing; y += spacing)
-            {
-                boundary.Add(NewBoundaryParticle(new Vector3(x, y, 0)));
-            }
+                boundary.Add(NewBoundaryParticle(new Vector3(x, y, 0f)));
         }
 
-        // Add to system
         masses.AddRange(boundary);
     }
 
@@ -262,13 +267,13 @@ public class SpringMassSystem : MonoBehaviour
         {
             position = pos,
             velocity = Vector3.zero,
-
             force = Vector3.zero,
             sphForce = Vector3.zero,
 
             mass = globalMassValue * BoundaryMassMultiplier,
 
-            density = restDensity * BoundaryDensityMultiplier,
+            // density/pressure: for Akinci we treat boundary as at restDensity
+            density = restDensity,
             pressure = 0f,
 
             smoothingRadius = globalSmoothingRadius,
@@ -283,7 +288,6 @@ public class SpringMassSystem : MonoBehaviour
     {
         float h = globalSmoothingRadius;
 
-        // Akinci: V_b = 1 / Σ_k W(|x_b - x_k|), sum over boundary neighbors
         for (int i = 0; i < masses.Count; i++)
         {
             MassPoint bi = masses[i];
@@ -293,6 +297,8 @@ public class SpringMassSystem : MonoBehaviour
 
             for (int j = 0; j < masses.Count; j++)
             {
+                if (i == j) continue; // IMPORTANT: skip self-term
+
                 MassPoint bj = masses[j];
                 if (!bj.isBoundary) continue;
 
@@ -305,16 +311,17 @@ public class SpringMassSystem : MonoBehaviour
         }
     }
 
-    // ----------------------------------------------------------------------
+    // ======================================================================
+    // SPRING SETUP
+    // ======================================================================
+
     void InitializeRestLengths()
     {
         foreach (var s in springs)
         {
             if (s.startMassIndex < 0 || s.startMassIndex >= masses.Count ||
                 s.endMassIndex < 0 || s.endMassIndex >= masses.Count)
-            {
                 continue;
-            }
 
             Vector3 pA = masses[s.startMassIndex].position;
             Vector3 pB = masses[s.endMassIndex].position;
@@ -322,7 +329,10 @@ public class SpringMassSystem : MonoBehaviour
         }
     }
 
-    // ----------------------------------------------------------------------
+    // ======================================================================
+    // FORCES
+    // ======================================================================
+
     void ApplyExternalForces()
     {
         for (int i = 0; i < masses.Count; i++)
@@ -344,16 +354,13 @@ public class SpringMassSystem : MonoBehaviour
         }
     }
 
-    // ----------------------------------------------------------------------
     void ApplySpringForces()
     {
         foreach (var s in springs)
         {
             if (s.startMassIndex < 0 || s.startMassIndex >= masses.Count ||
                 s.endMassIndex < 0 || s.endMassIndex >= masses.Count)
-            {
                 continue;
-            }
 
             MassPoint A = masses[s.startMassIndex];
             MassPoint B = masses[s.endMassIndex];
@@ -365,13 +372,9 @@ public class SpringMassSystem : MonoBehaviour
             Vector3 dir = delta / dist;
             float x = dist - s.restLength;
 
-            // Hooke
             Vector3 springForce = s.stiffness * x * dir;
-
-            // Damping (along spring direction)
             Vector3 relVel = B.velocity - A.velocity;
             Vector3 dampingForce = s.damping * Vector3.Dot(relVel, dir) * dir;
-
             Vector3 total = springForce + dampingForce;
 
             if (!A.isFixed) A.force += total;
@@ -382,8 +385,10 @@ public class SpringMassSystem : MonoBehaviour
         }
     }
 
-    // ----------------------------------------------------------------------
-    // SPH Kernels
+    // ======================================================================
+    // SPH KERNELS
+    // ======================================================================
+
     float Poly6Kernel(float r, float h)
     {
         if (r < 0f || r > h) return 0f;
@@ -412,7 +417,10 @@ public class SpringMassSystem : MonoBehaviour
         return coeff * (h - r);
     }
 
-    // ----------------------------------------------------------------------
+    // ======================================================================
+    // SPH DENSITY & PRESSURE
+    // ======================================================================
+
     void ComputeDensities()
     {
         float h = globalSmoothingRadius;
@@ -422,9 +430,9 @@ public class SpringMassSystem : MonoBehaviour
         {
             MassPoint pi = masses[i];
 
-            // Boundary particles just keep rest density
             if (pi.isBoundary)
             {
+                // boundary density is fixed to rest density
                 pi.density = restDensity;
                 masses[i] = pi;
                 continue;
@@ -449,15 +457,14 @@ public class SpringMassSystem : MonoBehaviour
                 }
             }
 
-            pi.density = Mathf.Max(density, 1e-6f); // avoid divide-by-zero
+            pi.density = Mathf.Max(density, 1e-6f);
             masses[i] = pi;
         }
     }
 
-    // ----------------------------------------------------------------------
     void ComputePressures()
     {
-         for (int i = 0; i < masses.Count; i++)
+        for (int i = 0; i < masses.Count; i++)
         {
             var p = masses[i];
 
@@ -467,20 +474,23 @@ public class SpringMassSystem : MonoBehaviour
             }
             else
             {
-                p.pressure = pressureStiffness * (p.density - restDensity);
+                // Clamp to avoid large negative tension
+                float raw = pressureStiffness * (p.density - restDensity);
+                p.pressure = Mathf.Max(0f, raw);
             }
 
             masses[i] = p;
         }
     }
 
-    // ----------------------------------------------------------------------
+    // ======================================================================
+    // SPH INTERNAL FORCES
+    // ======================================================================
+
     void ApplySPHPressureForces()
     {
         float h = globalSmoothingRadius;
         int n = masses.Count;
-
-        // Precompute ρ0^2 for boundary term
         float rho0Sq = restDensity * restDensity;
 
         for (int i = 0; i < n; i++)
@@ -504,13 +514,13 @@ public class SpringMassSystem : MonoBehaviour
 
                 if (pj.isBoundary)
                 {
-                    // Fluid–boundary pressure force (Akinci)
-                    float termBoundary = (pi.pressure / (pi.density * pi.density));
-                    pressureForce += -rho0Sq * pj.boundaryVolume * termBoundary * gradW;
+                    // Fluid-boundary (Akinci)
+                    float term = pi.pressure / (pi.density * pi.density);
+                    pressureForce += -rho0Sq * pj.boundaryVolume * term * gradW;
                 }
                 else
                 {
-                    // Standard fluid–fluid pressure
+                    // Fluid-fluid
                     float term =
                         (pi.pressure / (pi.density * pi.density)) +
                         (pj.pressure / (pj.density * pj.density));
@@ -525,7 +535,6 @@ public class SpringMassSystem : MonoBehaviour
         }
     }
 
-    // ----------------------------------------------------------------------
     void ApplySPHViscosityForces()
     {
         float h = globalSmoothingRadius;
@@ -546,7 +555,6 @@ public class SpringMassSystem : MonoBehaviour
                 MassPoint pj = masses[j];
                 if (pj.isFixed) continue;
 
-
                 Vector3 diff = pj.position - pi.position;
                 float r = diff.magnitude;
                 if (r <= 0f || r > h) continue;
@@ -557,11 +565,15 @@ public class SpringMassSystem : MonoBehaviour
             }
 
             pi.force += viscForce;
-            pi.sphForce += viscForce; // debug
+            pi.sphForce += viscForce;
+            masses[i] = pi;
         }
     }
 
-    // ----------------------------------------------------------------------
+    // ======================================================================
+    // INTEGRATION & COLLISIONS
+    // ======================================================================
+
     void Integrate()
     {
         for (int i = 0; i < masses.Count; i++)
@@ -583,7 +595,6 @@ public class SpringMassSystem : MonoBehaviour
         }
     }
 
-    // ----------------------------------------------------------------------
     void HandleCollisions(ref MassPoint m)
     {
         Collider[] hits = Physics.OverlapSphere(m.position, collisionRadius, collisionLayerMask);
@@ -625,7 +636,45 @@ public class SpringMassSystem : MonoBehaviour
         }
     }
 
-    // ----------------------------------------------------------------------
+    void PreStabilizationRelaxation()
+    {
+        for (int iter = 0; iter < preSolveIterations; iter++)
+        {
+            // Standard SPH steps
+            ComputeDensities();
+            ComputePressures();
+            ApplyExternalForces();   // only gravity
+            ApplySPHPressureForces();
+            ApplySPHViscosityForces();
+
+            // Integrate with extra damping
+            for (int i = 0; i < masses.Count; i++)
+            {
+                var m = masses[i];
+                if (m.isBoundary) continue;
+
+                m.velocity += (m.force / m.mass) * timeStep;
+                m.velocity *= (1f - preSolveDamping);
+                m.position += m.velocity * timeStep;
+
+                m.position.z = 0f;
+                masses[i] = m;
+            }
+        }
+
+        // Zero all velocities after stabilization to avoid movement at t=0
+        for (int i = 0; i < masses.Count; i++)
+        {
+            var m = masses[i];
+            m.velocity = Vector3.zero;
+            masses[i] = m;
+        }
+    }
+
+    // ======================================================================
+    // DEBUG DRAWING
+    // ======================================================================
+
     void OnDrawGizmos()
     {
         if (!showDebug || masses == null) return;
@@ -694,7 +743,6 @@ public class SpringMassSystem : MonoBehaviour
         // Density heatmap
         if (debugDrawBackground && masses.Count > 0)
         {
-            // Bounds from ALL particles (fluid + boundaries)
             float minX = float.MaxValue;
             float maxX = float.MinValue;
             float minY = float.MaxValue;
@@ -704,7 +752,6 @@ public class SpringMassSystem : MonoBehaviour
             {
                 if (m.position.x < minX) minX = m.position.x;
                 if (m.position.x > maxX) maxX = m.position.x;
-
                 if (m.position.y < minY) minY = m.position.y;
                 if (m.position.y > maxY) maxY = m.position.y;
             }
@@ -723,7 +770,7 @@ public class SpringMassSystem : MonoBehaviour
             {
                 for (int ix = 0; ix < resX; ix++)
                 {
-                    Vector3 sample = new Vector3(minX + ix * dx, minY + iy * dy, 0);
+                    Vector3 sample = new Vector3(minX + ix * dx, minY + iy * dy, 0f);
                     float density = SampleDensity(sample);
 
                     float t = Mathf.InverseLerp(debugMinDensity, debugMaxDensity, density);
@@ -740,25 +787,20 @@ public class SpringMassSystem : MonoBehaviour
 
     float SampleDensity(Vector3 p)
     {
-            float density = 0f;
-            float h = globalSmoothingRadius;
+        float density = 0f;
+        float h = globalSmoothingRadius;
 
-            foreach (var m in masses)
-            {
-                float r = (p - m.position).magnitude;
-                float w = Poly6Kernel(r, h);
+        foreach (var m in masses)
+        {
+            float r = (p - m.position).magnitude;
+            float w = Poly6Kernel(r, h);
 
-                if (!m.isBoundary)
-                {
-                    density += m.mass * w;
-                }
-                else
-                {
-                    density += restDensity * m.boundaryVolume * w;
-                }
-            }
+            if (!m.isBoundary)
+                density += m.mass * w;
+            else
+                density += restDensity * m.boundaryVolume * w;
+        }
 
-            return density;
+        return density;
     }
-
 }

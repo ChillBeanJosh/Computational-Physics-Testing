@@ -957,25 +957,25 @@ MonoBehaviour:
   masses: []
   springs: []
   globalMassValue: 5
-  gridWidth: 6
-  gridHeight: 6
+  gridWidth: 5
+  gridHeight: 5
   gridSpacing: 0.5
   dampingRatio: 0.1
   gravity: {x: 0, y: -9.81, z: 0}
-  timeStep: 0.001
+  timeStep: 0.01
   collisionLayerMask:
     serializedVersion: 2
-    m_Bits: 64
-  collisionRadius: 0.06
-  restitution: 0
-  friction: 0
+    m_Bits: 0
+  collisionRadius: 0.5
+  restitution: 0.3
+  friction: 0.5
   restDensity: 1000
   pressureStiffness: 10
-  viscosity: 0.2
-  globalSmoothingRadius: 1.2
-  BoundaryLayers: 2
-  BoundaryMassMultiplier: 15
-  BoundaryDensityMultiplier: 1
+  viscosity: 0.15
+  globalSmoothingRadius: 1
+  useGeometricContainer: 1
+  topClosed: 1
+  containerPadding: 0.25
   debugDrawBackground: 1
   backgroundLowColor: {r: 0.0047169924, g: 0.064636566, b: 1, a: 0.5882353}
   backgroundMidColor: {r: 1, g: 1, b: 1, a: 0.5882353}
