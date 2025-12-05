@@ -30,7 +30,7 @@ public class SpringMassSystem : MonoBehaviour
     [Header("SPH Parameters")]
     public float restDensity = 1000f;          // ρ0
     public float pressureStiffness = 10f;      // k in P = k(ρ-ρ0)
-    [Range(0f, 1f)] public float viscosity = 0.1f;
+    public float viscosity = 0.1f;
     public float globalSmoothingRadius = 1.2f; // h
     [Space]
     public int preSolveIterations = 50;
