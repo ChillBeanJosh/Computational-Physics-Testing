@@ -1,13 +1,14 @@
 using UnityEngine;
 
-public class Particle : MonoBehaviour
+[System.Serializable]
+public class Particle
 {
     [Header("Particle Parameters: ")]
     public float Mass;
     public float RestDensity;
     public float ViscosityCoefficient;
-    [Space]
     public float GasConstant;
+    [Space]
     public float ColorAttribute;
     public float Temperature;
 

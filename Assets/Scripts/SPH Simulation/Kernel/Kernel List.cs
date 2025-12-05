@@ -1,49 +1,44 @@
-using UnityEngine;
+﻿using UnityEngine;
 
 public class KernelList : MonoBehaviour
 {
-    public float W;
-
-
-    //All:
+    //----------------------------------------------------------------------------------------------------------------------------
+    //2D Poly6 Kernel (Density):
+    // W(r,h) = 4 / (π h^8) * (h^2 - r^2)^3
     public float Poly6(float r, float h)
     {
-        //Otherwise:
-        if (r < 0 || r > h) return W = 0;
+        if (r < 0f || r > h) return 0f;
 
-        var Function = (315f) / (64f * Mathf.PI * Mathf.Pow(h, 9));
+        float h2 = h * h;
+        float r2 = r * r;
+        float term = h2 - r2;
 
-        var term = (h * h) - (r * r);
-        var coefficient = term * term * term;
+        float constant = 4f / (Mathf.PI * Mathf.Pow(h, 8));
 
-
-        return W = coefficient;
+        return constant * term * term * term;
     }
 
-    //Pressure Kernel:
-    public float Spiky(float r, float h)
+    //----------------------------------------------------------------------------------------------------------------------------
+    //2D Spiky Gradient (Pressure):
+    // ∇W = -30 / (π h^5) * (h - r)^2 * r̂
+    public Vector3 SpikyGradient(Vector3 dir, float r, float h)
     {
-        //Otherwise:
-        if (r < 0 || r > h) return W = 0;
+        if (r <= 0f || r >= h) return Vector3.zero;
 
-        var Function = (15f) / (Mathf.PI * Mathf.Pow(h, 6));
+        float constant = -30f / (Mathf.PI * Mathf.Pow(h, 5));
+        float term = (h - r) * (h - r);
 
-        var term = (h - r);
-        var coefficient = term * term * term;
-
-        return W = coefficient;
+        return constant * term * (dir / r);
     }
 
-    //Viscosity Kernel:
-    public float Viscosity(float r, float h)
+    //----------------------------------------------------------------------------------------------------------------------------
+    //2D Viscosity Laplacian:
+    // ∇²W = 40 / (π h^5) * (h - r)
+    public float ViscosityLaplacian(float r, float h)
     {
-        //Otherwise:
-        if (r < 0 || r > h) return W = 0;
+        if (r < 0f || r > h) return 0f;
 
-        var Function = (15f) / (2 * Mathf.PI * Mathf.Pow(h, 3));
-
-        var coefficient = -(Mathf.Pow(r, 3) / 2 * Mathf.Pow(h, 3)) + (Mathf.Pow(r, 2) / Mathf.Pow(h, 2)) + (h / 2 * r) - 1;
-
-        return W = coefficient;
+        float constant = 40f / (Mathf.PI * Mathf.Pow(h, 5));
+        return constant * (h - r);
     }
 }
