@@ -7,13 +7,8 @@ public class GPUSPH3D : MonoBehaviour
 {
     [Header("Capacity (GPU buffers)")]
     [SerializeField, Range(256, 500000)] int particleCapacity = 20000;
-    public int ActiveParticleCount => activeCount;
 
-
-    [Header("SPH Parameters")]
-    [SerializeField] float restDensity = 1000f;
-    [SerializeField] float gasConstant = 2000f;
-    [SerializeField] float viscosity = 1f;
+    [Header("Shared SPH Parameters")]
     [SerializeField] float smoothingRadius = 0.2f;
     [SerializeField] float particleRadius = 0.09f;
 
@@ -23,14 +18,12 @@ public class GPUSPH3D : MonoBehaviour
     [SerializeField, Range(0f, 1f)] float boundaryDamping = 0.5f;
 
     [Header("Tank (required)")]
-    [Tooltip("Assign a BoxCollider that defines the tank volume. Put it on a child object to rotate/transform the tank.")]
     [SerializeField] BoxCollider tankCollider;
 
     [Header("GPU Grid")]
     [SerializeField, Min(1)] int maxParticlesPerCell = 64;
 
-    [Header("Spawner (press key to spawn)")]
-    [SerializeField] KeyCode spawnKey = KeyCode.Space;
+    [Header("Spawner")]
     [SerializeField] Vector3 spawnCenterWorld = new Vector3(0, 2, 0);
     [SerializeField, Min(1)] int spawnWidth = 27;
     [SerializeField, Min(1)] int spawnHeight = 27;
@@ -38,6 +31,11 @@ public class GPUSPH3D : MonoBehaviour
     [SerializeField, Range(0.05f, 2f)] float spawnSpacingMultiplier = 0.6f;
     [SerializeField] bool spawnAsSphere = true;
     [SerializeField] bool appendSpawns = true;
+
+    [Header("Spawn Keys")]
+    [SerializeField] KeyCode spawnWaterKey = KeyCode.Alpha1;
+    [SerializeField] KeyCode spawnOilKey = KeyCode.Alpha2;
+    [SerializeField] KeyCode spawnHoneyKey = KeyCode.Alpha3;
 
     [Header("Rendering")]
     [SerializeField] Material material;
@@ -53,17 +51,17 @@ public class GPUSPH3D : MonoBehaviour
     [SerializeField, Min(0f)] float sceneBoxesRefreshInterval = 0.25f;
 
     [Header("Render culling bounds")]
-    [SerializeField, Tooltip("Extra size added to tank bounds for frustum culling safety.")]
-    float renderBoundsMargin = 2f;
+    [SerializeField] float renderBoundsMargin = 2f;
 
     // Buffers
     ComputeBuffer particleBuffer;
     ComputeBuffer positionsBuffer;
+    ComputeBuffer fluidInfoBuffer;   // float2 per particle
     ComputeBuffer cellCountsBuffer;
     ComputeBuffer cellIndicesBuffer;
-
-    // Optional scene OBB boxes buffer (4 float4 per box)
     ComputeBuffer boxesBuffer;
+
+    ComputeBuffer fluidsBuffer;      // FluidParams table
 
     // Kernels
     int kClearGrid, kBuildGrid, kDensityPressure, kForces, kIntegrate;
@@ -74,10 +72,8 @@ public class GPUSPH3D : MonoBehaviour
         timeStepId = Shader.PropertyToID("_TimeStep"),
         gravityLocalId = Shader.PropertyToID("_GravityLocal"),
 
-        restDensityId = Shader.PropertyToID("_RestDensity"),
-        gasConstantId = Shader.PropertyToID("_GasConstant"),
-        viscosityId = Shader.PropertyToID("_Viscosity"),
         smoothingRadiusId = Shader.PropertyToID("_SmoothingRadius"),
+        particleRadiusId = Shader.PropertyToID("_ParticleRadius"),
 
         boundsMinLocalId = Shader.PropertyToID("_BoundsMinLocal"),
         boundsMaxLocalId = Shader.PropertyToID("_BoundsMaxLocal"),
@@ -86,9 +82,6 @@ public class GPUSPH3D : MonoBehaviour
         poly6ConstId = Shader.PropertyToID("_Poly6Constant"),
         spikyConstId = Shader.PropertyToID("_SpikyGradConstant"),
         viscConstId = Shader.PropertyToID("_ViscLapConstant"),
-
-        particleMassId = Shader.PropertyToID("_ParticleMass"),
-        particleRadiusId = Shader.PropertyToID("_ParticleRadius"),
 
         localToWorldId = Shader.PropertyToID("_LocalToWorld"),
 
@@ -99,47 +92,58 @@ public class GPUSPH3D : MonoBehaviour
 
         particlesId = Shader.PropertyToID("_Particles"),
         positionsId = Shader.PropertyToID("_Positions"),
+        fluidInfoId = Shader.PropertyToID("_FluidInfo"),
         cellCountsId = Shader.PropertyToID("_CellCounts"),
         cellIndicesId = Shader.PropertyToID("_CellIndices"),
 
         boxesId = Shader.PropertyToID("_Boxes"),
         boxCountId = Shader.PropertyToID("_BoxCount"),
 
+        fluidsId = Shader.PropertyToID("_Fluids"),
+        fluidCountId = Shader.PropertyToID("_FluidCount"),
+
         stepId = Shader.PropertyToID("_Step");
 
     [StructLayout(LayoutKind.Sequential)]
     struct ParticleData
     {
-        public Vector4 pos;   // tank-local
-        public Vector4 vel;   // tank-local
-        public Vector4 force; // tank-local
+        public Vector4 pos;
+        public Vector4 vel;
+        public Vector4 force;
         public float density;
         public float pressure;
-        public Vector2 pad;
+        public uint typeId;
+        public float mass;
+        public Vector4 pad; // keep stride stable
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct FluidParamsGPU
+    {
+        public float restDensity;
+        public float gasConstant;
+        public float viscosity;
+        public float pad;
     }
 
     int activeCount = 0;
     int cellCount = 0;
     int gridX, gridY, gridZ;
 
-    // Tank-local bounds
     Vector3 tankBoundsMinLocal;
     Vector3 tankBoundsMaxLocal;
     Vector3 tankGridOriginLocal;
 
     float boxesTimer = 0f;
 
+    public int ActiveParticleCount => activeCount;
+    public int ParticleCapacity => particleCapacity;
+
     void OnEnable()
     {
-        if (tankCollider == null)
+        if (tankCollider == null || sphCompute == null || material == null || mesh == null)
         {
-            Debug.LogError($"{nameof(GPUSPH3D)}: Assign a Tank BoxCollider.");
-            enabled = false;
-            return;
-        }
-        if (sphCompute == null || material == null || mesh == null)
-        {
-            Debug.LogError($"{nameof(GPUSPH3D)}: Missing compute shader / material / mesh.");
+            Debug.LogError($"{nameof(GPUSPH3D)}: Missing references (tankCollider/compute/material/mesh).");
             enabled = false;
             return;
         }
@@ -152,75 +156,67 @@ public class GPUSPH3D : MonoBehaviour
 
         RecomputeTankLocalBoundsAndGrid();
 
-        // Mass per particle (volume-based, consistent with your CPU 3D)
-        float spacing = smoothingRadius * spawnSpacingMultiplier;
-        float volume = spacing * spacing * spacing;
-        float particleMass = restDensity * volume;
-
         // Buffers
         particleBuffer = new ComputeBuffer(particleCapacity, Marshal.SizeOf<ParticleData>());
         positionsBuffer = new ComputeBuffer(particleCapacity, sizeof(float) * 3);
+        fluidInfoBuffer = new ComputeBuffer(particleCapacity, sizeof(float) * 2);
 
         cellCountsBuffer = new ComputeBuffer(cellCount, sizeof(uint));
         cellIndicesBuffer = new ComputeBuffer(cellCount * maxParticlesPerCell, sizeof(uint));
 
-        // Optional scene boxes
-        boxesBuffer = new ComputeBuffer(4 * 64, sizeof(float) * 4); // 64 boxes initially
+        boxesBuffer = new ComputeBuffer(4 * 64, sizeof(float) * 4);
         boxesBuffer.SetData(new Vector4[4 * 64]);
+
+        // Fluids table buffer
+        fluidsBuffer = new ComputeBuffer(FluidLibrary.FluidCount, Marshal.SizeOf<FluidParamsGPU>());
+        UploadFluidParamsTable();
 
         // Init buffers
         particleBuffer.SetData(new ParticleData[particleCapacity]);
         positionsBuffer.SetData(new Vector3[particleCapacity]);
+        fluidInfoBuffer.SetData(new Vector2[particleCapacity]);
         cellCountsBuffer.SetData(new uint[cellCount]);
         cellIndicesBuffer.SetData(new uint[cellCount * maxParticlesPerCell]);
 
-        // Bind
+        // Bind all kernels
         BindCommon(kClearGrid);
         BindCommon(kBuildGrid);
         BindCommon(kDensityPressure);
         BindCommon(kForces);
         BindCommon(kIntegrate);
 
-        // Constant params
-        sphCompute.SetFloat(restDensityId, restDensity);
-        sphCompute.SetFloat(gasConstantId, gasConstant);
-        sphCompute.SetFloat(viscosityId, viscosity);
+        // Constants
         sphCompute.SetFloat(smoothingRadiusId, smoothingRadius);
-        sphCompute.SetFloat(particleMassId, particleMass);
         sphCompute.SetFloat(particleRadiusId, particleRadius);
-
         sphCompute.SetFloat(boundaryDampingId, boundaryDamping);
 
-        // Grid params (local)
         sphCompute.SetInts(gridSizeId, gridX, gridY, gridZ);
         sphCompute.SetVector(gridOriginLocalId, tankGridOriginLocal);
         sphCompute.SetFloat(cellSizeId, smoothingRadius);
         sphCompute.SetInt(maxPerCellId, maxParticlesPerCell);
 
-        // Tank bounds (local)
         sphCompute.SetVector(boundsMinLocalId, tankBoundsMinLocal);
         sphCompute.SetVector(boundsMaxLocalId, tankBoundsMaxLocal);
 
-        // Kernel constants (3D, match KernelList.cs)
+        // Kernel constants (3D)
         float PI = Mathf.PI;
         float h = smoothingRadius;
         sphCompute.SetFloat(poly6ConstId, 315f / (64f * PI * Mathf.Pow(h, 9)));
         sphCompute.SetFloat(spikyConstId, -45f / (PI * Mathf.Pow(h, 6)));
         sphCompute.SetFloat(viscConstId, 45f / (PI * Mathf.Pow(h, 6)));
 
-        // Rendering binding (same pattern as GPUGraph)
+        // Rendering binding
         material.SetBuffer(positionsId, positionsBuffer);
+        material.SetBuffer(fluidInfoId, fluidInfoBuffer);
         material.SetFloat(stepId, renderStep);
 
         // Start empty
         activeCount = 0;
         sphCompute.SetInt(particleCountId, activeCount);
 
-        // No scene boxes by default
         sphCompute.SetInt(boxCountId, 0);
         boxesTimer = 0f;
 
-        // Ensure first upload if enabled
         if (enableSceneBoxColliders)
             UploadSceneBoxCollidersAsOBB_InTankLocal();
     }
@@ -229,40 +225,67 @@ public class GPUSPH3D : MonoBehaviour
     {
         particleBuffer?.Release();
         positionsBuffer?.Release();
+        fluidInfoBuffer?.Release();
         cellCountsBuffer?.Release();
         cellIndicesBuffer?.Release();
         boxesBuffer?.Release();
+        fluidsBuffer?.Release();
 
         particleBuffer = null;
         positionsBuffer = null;
+        fluidInfoBuffer = null;
         cellCountsBuffer = null;
         cellIndicesBuffer = null;
         boxesBuffer = null;
+        fluidsBuffer = null;
     }
 
     void BindCommon(int kernel)
     {
         sphCompute.SetBuffer(kernel, particlesId, particleBuffer);
         sphCompute.SetBuffer(kernel, positionsId, positionsBuffer);
+        sphCompute.SetBuffer(kernel, fluidInfoId, fluidInfoBuffer);
         sphCompute.SetBuffer(kernel, cellCountsId, cellCountsBuffer);
         sphCompute.SetBuffer(kernel, cellIndicesId, cellIndicesBuffer);
 
-        // Optional OBB boxes
         sphCompute.SetBuffer(kernel, boxesId, boxesBuffer);
+        sphCompute.SetBuffer(kernel, fluidsId, fluidsBuffer);
+    }
+
+    void UploadFluidParamsTable()
+    {
+        var arr = new FluidParamsGPU[FluidLibrary.FluidCount];
+        for (int i = 0; i < FluidLibrary.FluidCount; i++)
+        {
+            var f = FluidLibrary.Get((FluidLibrary.FluidType)i);
+            arr[i] = new FluidParamsGPU
+            {
+                restDensity = f.restDensity,
+                gasConstant = f.gasConstant,
+                viscosity = f.viscosity,
+                pad = 0f
+            };
+        }
+        fluidsBuffer.SetData(arr);
+        sphCompute.SetInt(fluidCountId, FluidLibrary.FluidCount);
     }
 
     void Update()
     {
-        if (Input.GetKeyDown(spawnKey))
-            SpawnToGPU();
+        if (Input.GetKeyDown(spawnWaterKey))
+            SpawnToGPU(FluidLibrary.FluidType.Water);
+
+        if (Input.GetKeyDown(spawnOilKey))
+            SpawnToGPU(FluidLibrary.FluidType.Oil);
+
+        if (Input.GetKeyDown(spawnHoneyKey))
+            SpawnToGPU(FluidLibrary.FluidType.Honey);
     }
 
-    // SIMULATION in FixedUpdate (physics timestep)
     void FixedUpdate()
     {
         if (activeCount <= 0) return;
 
-        // Update optional scene box colliders occasionally
         if (enableSceneBoxColliders)
         {
             boxesTimer -= Time.fixedDeltaTime;
@@ -279,28 +302,21 @@ public class GPUSPH3D : MonoBehaviour
 
         // Per-step params
         sphCompute.SetFloat(timeStepId, timeStep);
-
-        // Gravity in tank-local space so rotating tank sloshes fluid
-        Transform tankT = tankCollider.transform;
-        Vector3 gravityLocal = tankT.InverseTransformDirection(gravityWorld);
-        sphCompute.SetVector(gravityLocalId, gravityLocal);
-
-        // Tank local->world for rendering (compute writes world positions)
-        sphCompute.SetMatrix(localToWorldId, tankT.localToWorldMatrix);
-
-        // Live tweak params
         sphCompute.SetFloat(boundaryDampingId, boundaryDamping);
         sphCompute.SetFloat(particleRadiusId, particleRadius);
+
+        Transform tankT = tankCollider.transform;
+        sphCompute.SetVector(gravityLocalId, tankT.InverseTransformDirection(gravityWorld));
+        sphCompute.SetMatrix(localToWorldId, tankT.localToWorldMatrix);
+
         sphCompute.SetInt(particleCountId, activeCount);
 
-        // Thread groups
         int tgParticles = Mathf.CeilToInt(activeCount / 256f);
         if (tgParticles < 1) tgParticles = 1;
 
         int tgCells = Mathf.CeilToInt(cellCount / 256f);
         if (tgCells < 1) tgCells = 1;
 
-        // Pipeline
         sphCompute.Dispatch(kClearGrid, tgCells, 1, 1);
         sphCompute.Dispatch(kBuildGrid, tgParticles, 1, 1);
         sphCompute.Dispatch(kDensityPressure, tgParticles, 1, 1);
@@ -308,12 +324,12 @@ public class GPUSPH3D : MonoBehaviour
         sphCompute.Dispatch(kIntegrate, tgParticles, 1, 1);
     }
 
-    // RENDER in LateUpdate (every rendered frame) -> prevents flicker
     void LateUpdate()
     {
         if (activeCount <= 0) return;
 
         material.SetBuffer(positionsId, positionsBuffer);
+        material.SetBuffer(fluidInfoId, fluidInfoBuffer);
         material.SetFloat(stepId, renderStep);
 
         Bounds wb = tankCollider.bounds;
@@ -322,11 +338,6 @@ public class GPUSPH3D : MonoBehaviour
         Graphics.DrawMeshInstancedProcedural(mesh, 0, material, drawBounds, activeCount);
     }
 
-    // -----------------------
-    // Tank bounds + grid sizing (local)
-    // NOTE: If you change tank size at runtime, you must reallocate cell buffers.
-    // Rotating/moving is fine without changing buffers.
-    // -----------------------
     void RecomputeTankLocalBoundsAndGrid()
     {
         Vector3 half = tankCollider.size * 0.5f;
@@ -334,7 +345,6 @@ public class GPUSPH3D : MonoBehaviour
 
         tankBoundsMinLocal = center - half;
         tankBoundsMaxLocal = center + half;
-
         tankGridOriginLocal = tankBoundsMinLocal;
 
         float cellSize = smoothingRadius;
@@ -346,10 +356,7 @@ public class GPUSPH3D : MonoBehaviour
         cellCount = Mathf.Max(1, gridX * gridY * gridZ);
     }
 
-    // -----------------------
-    // Spawning (world center -> tank-local positions)
-    // -----------------------
-    void SpawnToGPU()
+    void SpawnToGPU(FluidLibrary.FluidType fluidType)
     {
         if (particleBuffer == null) return;
 
@@ -370,8 +377,16 @@ public class GPUSPH3D : MonoBehaviour
         float radius = Mathf.Min(totalW, Mathf.Min(totalH, totalD)) * 0.5f;
         float radiusSq = radius * radius;
 
-        var list = new List<ParticleData>(Mathf.Min(remaining, spawnWidth * spawnHeight * spawnDepth));
         float jitter = spacing * 0.05f;
+
+        // Mass uses fluid's rest density * volume (like your CPU version)
+        var fs = FluidLibrary.Get(fluidType);
+        float volume = spacing * spacing * spacing;
+        float particleMass = fs.restDensity * volume;
+
+        uint typeId = (uint)fluidType;
+
+        var list = new List<ParticleData>(Mathf.Min(remaining, spawnWidth * spawnHeight * spawnDepth));
 
         for (int z = 0; z < spawnDepth && list.Count < remaining; z++)
             for (int y = 0; y < spawnHeight && list.Count < remaining; y++)
@@ -391,7 +406,6 @@ public class GPUSPH3D : MonoBehaviour
 
                     Vector3 pLocal = tankT.InverseTransformPoint(pWorld);
 
-                    // Skip outside tank local AABB
                     if (pLocal.x < tankBoundsMinLocal.x || pLocal.x > tankBoundsMaxLocal.x ||
                         pLocal.y < tankBoundsMinLocal.y || pLocal.y > tankBoundsMaxLocal.y ||
                         pLocal.z < tankBoundsMinLocal.z || pLocal.z > tankBoundsMaxLocal.z)
@@ -402,28 +416,35 @@ public class GPUSPH3D : MonoBehaviour
                         pos = new Vector4(pLocal.x, pLocal.y, pLocal.z, 0f),
                         vel = Vector4.zero,
                         force = Vector4.zero,
-                        density = restDensity,
+                        density = fs.restDensity,
                         pressure = 0f,
-                        pad = Vector2.zero
+                        typeId = typeId,
+                        mass = particleMass,
+                        pad = Vector4.zero
                     });
                 }
 
         int spawned = list.Count;
         if (spawned <= 0) return;
 
-        // Upload particles
         particleBuffer.SetData(list, 0, writeOffset, spawned);
 
-        // Upload initial positions so they are visible immediately (compute overwrites next step)
+        // Seed positions + fluidInfo so visible immediately
         Vector3[] posArr = new Vector3[spawned];
+        Vector2[] infoArr = new Vector2[spawned];
+
         Matrix4x4 localToWorld = tankT.localToWorldMatrix;
+        float typeNorm = (FluidLibrary.FluidCount > 1) ? ((float)typeId / (FluidLibrary.FluidCount - 1)) : 0f;
+
         for (int i = 0; i < spawned; i++)
         {
             Vector4 pl = list[i].pos;
-            Vector3 w = localToWorld.MultiplyPoint3x4(new Vector3(pl.x, pl.y, pl.z));
-            posArr[i] = w;
+            posArr[i] = localToWorld.MultiplyPoint3x4(new Vector3(pl.x, pl.y, pl.z));
+            infoArr[i] = new Vector2(typeNorm, 1f); // densityRatio ~1 at spawn
         }
+
         positionsBuffer.SetData(posArr, 0, writeOffset, spawned);
+        fluidInfoBuffer.SetData(infoArr, 0, writeOffset, spawned);
 
         if (appendSpawns) activeCount += spawned;
         else activeCount = spawned;
@@ -431,16 +452,10 @@ public class GPUSPH3D : MonoBehaviour
         sphCompute.SetInt(particleCountId, activeCount);
     }
 
-    // -----------------------
-    // Upload scene BoxColliders as OBB in tank-local space
-    // -----------------------
     void UploadSceneBoxCollidersAsOBB_InTankLocal()
     {
-        if (boxesBuffer == null) return;
-
         var boxes = FindObjectsOfType<BoxCollider>()
-            .Where(b => b != null && b.enabled &&
-                        b != tankCollider &&
+            .Where(b => b != null && b.enabled && b != tankCollider &&
                         ((1 << b.gameObject.layer) & sceneBoxLayer.value) != 0)
             .ToArray();
 
@@ -502,12 +517,8 @@ public class GPUSPH3D : MonoBehaviour
         sphCompute.SetInt(boxCountId, count);
     }
 
-    // -----------------------
-    // Gizmos: spawn sphere + tank OBB
-    // -----------------------
     void OnDrawGizmos()
     {
-        // Spawn volume gizmo (world)
         float spacing = smoothingRadius * spawnSpacingMultiplier;
         float totalW = spawnWidth * spacing;
         float totalH = spawnHeight * spacing;
@@ -517,11 +528,9 @@ public class GPUSPH3D : MonoBehaviour
         Gizmos.color = Color.magenta;
         Gizmos.DrawWireSphere(spawnCenterWorld, radius);
 
-        // Tank OBB gizmo
         if (tankCollider != null)
         {
             Gizmos.color = Color.yellow;
-
             Transform t = tankCollider.transform;
 
             Vector3 centerW = t.TransformPoint(tankCollider.center);

@@ -1,5 +1,4 @@
-﻿// SPH3D.compute
-#pragma kernel ClearGrid
+﻿#pragma kernel ClearGrid
 #pragma kernel BuildGrid
 #pragma kernel ComputeDensityPressure
 #pragma kernel ComputeForces
@@ -11,11 +10,8 @@
 uint _ParticleCount;
 
 float _TimeStep;
-float3 _GravityLocal; // gravity expressed in tank-local space
+float3 _GravityLocal; // gravity in tank-local space
 
-float _RestDensity;
-float _GasConstant;
-float _Viscosity;
 float _SmoothingRadius;
 
 float3 _BoundsMinLocal; // tank-local AABB bounds
@@ -25,14 +21,14 @@ float _BoundaryDamping; // restitution multiplier (0..1 recommended)
 float _Poly6Constant;
 float _SpikyGradConstant;
 float _ViscLapConstant;
-float _ParticleMass;
+
 float _ParticleRadius;
 
 // Tank transform (for rendering only)
-float4x4 _LocalToWorld; // tank local -> world
+float4x4 _LocalToWorld;
 
 // ----------------------
-// Grid (3D) for neighbor search (in tank-local space)
+// Grid (3D) neighbor search (tank-local)
 // ----------------------
 uint3 _GridSize;
 float3 _GridOriginLocal;
@@ -43,15 +39,24 @@ RWStructuredBuffer<uint> _CellCounts;
 RWStructuredBuffer<uint> _CellIndices;
 
 // ----------------------
-// Optional box colliders (in tank-local space)
-// Each box uses 4 float4s:
-// 0: center.xyz, half.x
-// 1: axisX.xyz, half.y
-// 2: axisY.xyz, half.z
-// 3: axisZ.xyz, unused
+// Optional box colliders (OBB) in tank-local space
+// 4 float4 per box
 // ----------------------
 StructuredBuffer<float4> _Boxes;
 uint _BoxCount;
+
+// ----------------------
+// Fluid params table
+// ----------------------
+struct FluidParams
+{
+    float restDensity; // rho0
+    float gasConstant; // k
+    float viscosity; // mu
+    float pad;
+};
+StructuredBuffer<FluidParams> _Fluids;
+uint _FluidCount;
 
 // ----------------------
 // Particle data
@@ -63,13 +68,16 @@ struct ParticleData
     float4 force; // xyz = force accumulator
     float density;
     float pressure;
-    float2 pad;
+    uint typeId;
+    float mass;
+    float4 pad; // keep stride nice and predictable (80 bytes)
 };
 
 RWStructuredBuffer<ParticleData> _Particles;
 
-// Render positions (world space)
-RWStructuredBuffer<float3> _Positions;
+// Render buffers
+RWStructuredBuffer<float3> _Positions; // world positions
+RWStructuredBuffer<float2> _FluidInfo; // x=typeNormalized (0..1), y=densityRatio
 
 // ----------------------
 // Helpers
@@ -93,10 +101,8 @@ uint3 CellCoordFromPos(float3 pLocal)
     return (uint3) uint3(cx, cy, cz);
 }
 
-// 3D kernels
 float Poly6(float r, float h)
 {
-    // W(r,h) = 315/(64*pi*h^9) * (h^2 - r^2)^3   for 0<=r<=h
     if (r < 0.0 || r > h)
         return 0.0;
     float h2 = h * h;
@@ -106,9 +112,8 @@ float Poly6(float r, float h)
 
 float3 SpikyGrad(float3 rvec, float r, float h)
 {
-    // ∇W = -45/(pi*h^6) * (h - r)^2 * rhat   for 0<r<h
     if (r <= 0.0 || r >= h)
-        return float3(0.0, 0.0, 0.0);
+        return 0.0.xxx;
     float term = (h - r);
     float k = _SpikyGradConstant * term * term;
     return k * (rvec / r);
@@ -116,7 +121,6 @@ float3 SpikyGrad(float3 rvec, float r, float h)
 
 float ViscLaplacian(float r, float h)
 {
-    // ∇^2 W = 45/(pi*h^6) * (h - r)   for 0<=r<=h
     if (r < 0.0 || r > h)
         return 0.0;
     return _ViscLapConstant * (h - r);
@@ -125,13 +129,12 @@ float ViscLaplacian(float r, float h)
 float3 ClosestPointOnOBB(float3 p, float3 c, float3 ax, float3 ay, float3 az, float3 halfExtents)
 {
     float3 d = p - c;
-
     float x = clamp(dot(d, ax), -halfExtents.x, halfExtents.x);
     float y = clamp(dot(d, ay), -halfExtents.y, halfExtents.y);
     float z = clamp(dot(d, az), -halfExtents.z, halfExtents.z);
-
     return c + ax * x + ay * y + az * z;
 }
+
 // ----------------------
 // Kernels
 // ----------------------
@@ -151,7 +154,7 @@ void BuildGrid(uint3 id : SV_DispatchThreadID)
     if (i >= _ParticleCount)
         return;
 
-    float3 p = _Particles[i].pos.xyz; // tank-local
+    float3 p = _Particles[i].pos.xyz;
     uint3 c = CellCoordFromPos(p);
     uint cellIndex = CellIndexFromCoord(c);
 
@@ -174,19 +177,20 @@ void ComputeDensityPressure(uint3 id : SV_DispatchThreadID)
     ParticleData pi = _Particles[i];
     float3 posi = pi.pos.xyz;
 
+    uint typeI = (pi.typeId < _FluidCount) ? pi.typeId : 0;
+    FluidParams fi = _Fluids[typeI];
+
     uint3 cell = CellCoordFromPos(posi);
-    float sumW = 0.0;
+    float sum = 0.0;
 
     float h = _SmoothingRadius;
     float h2 = h * h;
 
     [unroll]
     for (int dz = -1; dz <= 1; dz++)
-    {
-        [unroll]
+    [unroll]
         for (int dy = -1; dy <= 1; dy++)
-        {
-            [unroll]
+    [unroll]
             for (int dx = -1; dx <= 1; dx++)
             {
                 int nx = (int) cell.x + dx;
@@ -194,7 +198,7 @@ void ComputeDensityPressure(uint3 id : SV_DispatchThreadID)
                 int nz = (int) cell.z + dz;
 
                 if (nx < 0 || ny < 0 || nz < 0 ||
-                    nx >= (int) _GridSize.x || ny >= (int) _GridSize.y || nz >= (int) _GridSize.z)
+            nx >= (int) _GridSize.x || ny >= (int) _GridSize.y || nz >= (int) _GridSize.z)
                     continue;
 
                 uint nCellIndex = (uint) nx + (uint) ny * _GridSize.x + (uint) nz * (_GridSize.x * _GridSize.y);
@@ -204,21 +208,20 @@ void ComputeDensityPressure(uint3 id : SV_DispatchThreadID)
                 {
                     uint j = _CellIndices[nCellIndex * _MaxParticlesPerCell + k];
 
-                    float3 posj = _Particles[j].pos.xyz;
-                    float3 d = posi - posj;
+                    ParticleData pj = _Particles[j];
+
+                    float3 d = posi - pj.pos.xyz;
                     float r2 = dot(d, d);
                     if (r2 >= h2)
                         continue;
 
                     float r = sqrt(max(r2, 1e-12));
-                    sumW += Poly6(r, h);
+                    sum += pj.mass * Poly6(r, h);
                 }
             }
-        }
-    }
 
-    float density = max(_ParticleMass * sumW, 1e-5);
-    float pressure = max(_GasConstant * (density - _RestDensity), 0.0);
+    float density = max(sum, 1e-5);
+    float pressure = max(fi.gasConstant * (density - fi.restDensity), 0.0);
 
     pi.density = density;
     pi.pressure = pressure;
@@ -236,21 +239,22 @@ void ComputeForces(uint3 id : SV_DispatchThreadID)
     float3 posi = pi.pos.xyz;
     float3 veli = pi.vel.xyz;
 
+    uint typeI = (pi.typeId < _FluidCount) ? pi.typeId : 0;
+    FluidParams fi = _Fluids[typeI];
+
     uint3 cell = CellCoordFromPos(posi);
 
-    float3 fPressure = float3(0.0, 0.0, 0.0);
-    float3 fVisc = float3(0.0, 0.0, 0.0);
+    float3 fPressure = 0.0.xxx;
+    float3 fVisc = 0.0.xxx;
 
     float h = _SmoothingRadius;
     float h2 = h * h;
 
     [unroll]
     for (int dz = -1; dz <= 1; dz++)
-    {
-        [unroll]
+    [unroll]
         for (int dy = -1; dy <= 1; dy++)
-        {
-            [unroll]
+    [unroll]
             for (int dx = -1; dx <= 1; dx++)
             {
                 int nx = (int) cell.x + dx;
@@ -258,7 +262,7 @@ void ComputeForces(uint3 id : SV_DispatchThreadID)
                 int nz = (int) cell.z + dz;
 
                 if (nx < 0 || ny < 0 || nz < 0 ||
-                    nx >= (int) _GridSize.x || ny >= (int) _GridSize.y || nz >= (int) _GridSize.z)
+            nx >= (int) _GridSize.x || ny >= (int) _GridSize.y || nz >= (int) _GridSize.z)
                     continue;
 
                 uint nCellIndex = (uint) nx + (uint) ny * _GridSize.x + (uint) nz * (_GridSize.x * _GridSize.y);
@@ -279,22 +283,24 @@ void ComputeForces(uint3 id : SV_DispatchThreadID)
 
                     float r = sqrt(r2);
 
-                    // Pressure
+                    uint typeJ = (pj.typeId < _FluidCount) ? pj.typeId : 0;
+                    FluidParams fj = _Fluids[typeJ];
+
+            // Pressure
                     float3 gradW = SpikyGrad(rvec, r, h);
                     float term = (pi.pressure / (pi.density * pi.density)) +
-                                 (pj.pressure / (pj.density * pj.density));
-                    fPressure += -_ParticleMass * term * gradW;
+                         (pj.pressure / (pj.density * pj.density));
+                    fPressure += -pj.mass * term * gradW;
 
-                    // Viscosity
+            // Viscosity: simple symmetric mixing rule
+                    float mu = 0.5 * (fi.viscosity + fj.viscosity);
                     float lap = ViscLaplacian(r, h);
                     float3 dv = pj.vel.xyz - veli;
-                    fVisc += _Viscosity * _ParticleMass * (dv / pj.density) * lap;
+                    fVisc += mu * pj.mass * (dv / pj.density) * lap;
                 }
             }
-        }
-    }
 
-    float3 fGravity = _ParticleMass * _GravityLocal;
+    float3 fGravity = pi.mass * _GravityLocal;
 
     pi.force.xyz = fPressure + fVisc + fGravity;
     _Particles[i] = pi;
@@ -316,7 +322,7 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     vel += acc * _TimeStep;
     pos += vel * _TimeStep;
 
-    // --- Tank-local AABB boundary (keeps particles inside tank volume) ---
+    // Tank-local AABB boundary
     if (pos.x < _BoundsMinLocal.x)
     {
         pos.x = _BoundsMinLocal.x;
@@ -350,7 +356,7 @@ void Integrate(uint3 id : SV_DispatchThreadID)
         vel.z *= _BoundaryDamping;
     }
 
-    // --- Optional BoxCollider-style collisions (OBB in tank-local space) ---
+    // Optional OBB collisions
     float pr = _ParticleRadius;
     for (uint bi = 0; bi < _BoxCount; ++bi)
     {
@@ -386,10 +392,17 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     // store back
     p.pos.xyz = pos;
     p.vel.xyz = vel;
-    p.force.xyz = float3(0.0, 0.0, 0.0);
+    p.force.xyz = 0.0.xxx;
     _Particles[i] = p;
 
-    // output world position for rendering
+    // render outputs
     float4 world = mul(_LocalToWorld, float4(pos, 1.0));
     _Positions[i] = world.xyz;
+
+    uint typeI = (p.typeId < _FluidCount) ? p.typeId : 0;
+    FluidParams fi = _Fluids[typeI];
+    float typeNorm = (_FluidCount > 1) ? ((float) typeI / (float) (_FluidCount - 1)) : 0.0;
+    float densityRatio = saturate(p.density / max(fi.restDensity, 1e-5));
+
+    _FluidInfo[i] = float2(typeNorm, densityRatio);
 }
