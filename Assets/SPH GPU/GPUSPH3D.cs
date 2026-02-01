@@ -32,10 +32,22 @@ public class GPUSPH3D : MonoBehaviour
     [SerializeField] bool spawnAsSphere = true;
     [SerializeField] bool appendSpawns = true;
 
-    [Header("Spawn Keys")]
-    [SerializeField] KeyCode spawnWaterKey = KeyCode.Alpha1;
-    [SerializeField] KeyCode spawnOilKey = KeyCode.Alpha2;
-    [SerializeField] KeyCode spawnHoneyKey = KeyCode.Alpha3;
+    [System.Serializable]
+    public struct FluidSpawnKey
+    {
+        public FluidLibrary.FluidType fluid;
+        public KeyCode key;
+    }
+
+    [Header("Spawn Keys (Expandable)")]
+    [SerializeField]
+    FluidSpawnKey[] spawnKeys =
+    {
+        new FluidSpawnKey { fluid = FluidLibrary.FluidType.Water,  key = KeyCode.Alpha1 },
+        new FluidSpawnKey { fluid = FluidLibrary.FluidType.Oil,    key = KeyCode.Alpha2 },
+        new FluidSpawnKey { fluid = FluidLibrary.FluidType.Honey,  key = KeyCode.Alpha3 },
+        new FluidSpawnKey { fluid = FluidLibrary.FluidType.Custom, key = KeyCode.Alpha4 },
+    };
 
     [Header("Rendering")]
     [SerializeField] Material material;
@@ -271,14 +283,13 @@ public class GPUSPH3D : MonoBehaviour
 
     void Update()
     {
-        if (Input.GetKeyDown(spawnWaterKey))
-            SpawnToGPU(FluidLibrary.FluidType.Water);
+        if (spawnKeys == null) return;
 
-        if (Input.GetKeyDown(spawnOilKey))
-            SpawnToGPU(FluidLibrary.FluidType.Oil);
-
-        if (Input.GetKeyDown(spawnHoneyKey))
-            SpawnToGPU(FluidLibrary.FluidType.Honey);
+        for (int i = 0; i < spawnKeys.Length; i++)
+        {
+            if (Input.GetKeyDown(spawnKeys[i].key))
+                SpawnToGPU(spawnKeys[i].fluid);
+        }
     }
 
     void FixedUpdate()

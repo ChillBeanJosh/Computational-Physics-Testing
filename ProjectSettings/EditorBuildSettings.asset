@@ -9,7 +9,7 @@ EditorBuildSettings:
     path: Assets/Scenes/Build/MainMenu.unity
     guid: 594afd811a987c645878372bfaae83a3
   - enabled: 1
-    path: Assets/Scenes/Build/Fluid Test.unity
+    path: Assets/Scenes/Build/FluidTest.unity
     guid: d606f02068e867a43ba0e14656390f52
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
