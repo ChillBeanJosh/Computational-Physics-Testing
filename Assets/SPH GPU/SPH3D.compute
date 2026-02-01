@@ -1,22 +1,21 @@
-﻿#pragma kernel ClearGrid
+﻿//Kernel Functions:
+#pragma kernel ClearGrid
 #pragma kernel BuildGrid
 #pragma kernel ComputeDensityPressure
 #pragma kernel ComputeForces
 #pragma kernel Integrate
 
-// ----------------------
-// Simulation params
-// ----------------------
+//Parameters:
 uint _ParticleCount;
 
 float _TimeStep;
-float3 _GravityLocal; // gravity in tank-local space
+float3 _GravityLocal; 
 
 float _SmoothingRadius;
 
-float3 _BoundsMinLocal; // tank-local AABB bounds
+float3 _BoundsMinLocal; 
 float3 _BoundsMaxLocal;
-float _BoundaryDamping; // restitution multiplier (0..1 recommended)
+float _BoundaryDamping; 
 
 float _Poly6Constant;
 float _SpikyGradConstant;
@@ -24,12 +23,9 @@ float _ViscLapConstant;
 
 float _ParticleRadius;
 
-// Tank transform (for rendering only)
 float4x4 _LocalToWorld;
 
-// ----------------------
-// Grid (3D) neighbor search (tank-local)
-// ----------------------
+
 uint3 _GridSize;
 float3 _GridOriginLocal;
 float _CellSize;
@@ -38,16 +34,11 @@ uint _MaxParticlesPerCell;
 RWStructuredBuffer<uint> _CellCounts;
 RWStructuredBuffer<uint> _CellIndices;
 
-// ----------------------
-// Optional box colliders (OBB) in tank-local space
-// 4 float4 per box
-// ----------------------
+
 StructuredBuffer<float4> _Boxes;
 uint _BoxCount;
 
-// ----------------------
-// Fluid params table
-// ----------------------
+//Fluid Types:
 struct FluidParams
 {
     float restDensity; // rho0
@@ -58,30 +49,27 @@ struct FluidParams
 StructuredBuffer<FluidParams> _Fluids;
 uint _FluidCount;
 
-// ----------------------
-// Particle data
-// ----------------------
+//Particle Data:
 struct ParticleData
 {
-    float4 pos; // xyz = position in tank-local space
-    float4 vel; // xyz = velocity in tank-local space
-    float4 force; // xyz = force accumulator
+    float4 pos; 
+    float4 vel; 
+    float4 force; 
     float density;
     float pressure;
     uint typeId;
     float mass;
-    float4 pad; // keep stride nice and predictable (80 bytes)
+    float4 pad; 
 };
 
 RWStructuredBuffer<ParticleData> _Particles;
 
-// Render buffers
-RWStructuredBuffer<float3> _Positions; // world positions
-RWStructuredBuffer<float2> _FluidInfo; // x=typeNormalized (0..1), y=densityRatio
+//Render Outputs:
+RWStructuredBuffer<float3> _Positions; 
+RWStructuredBuffer<float2> _FluidInfo; 
 
-// ----------------------
-// Helpers
-// ----------------------
+
+//Helper Functions:
 uint CellIndexFromCoord(uint3 c)
 {
     return c.x + c.y * _GridSize.x + c.z * (_GridSize.x * _GridSize.y);
@@ -135,9 +123,7 @@ float3 ClosestPointOnOBB(float3 p, float3 c, float3 ax, float3 ay, float3 az, fl
     return c + ax * x + ay * y + az * z;
 }
 
-// ----------------------
-// Kernels
-// ----------------------
+//Kernels:
 [numthreads(256, 1, 1)]
 void ClearGrid(uint3 id : SV_DispatchThreadID)
 {
@@ -286,13 +272,13 @@ void ComputeForces(uint3 id : SV_DispatchThreadID)
                     uint typeJ = (pj.typeId < _FluidCount) ? pj.typeId : 0;
                     FluidParams fj = _Fluids[typeJ];
 
-            // Pressure
+            // Pressure:
                     float3 gradW = SpikyGrad(rvec, r, h);
                     float term = (pi.pressure / (pi.density * pi.density)) +
                          (pj.pressure / (pj.density * pj.density));
                     fPressure += -pj.mass * term * gradW;
 
-            // Viscosity: simple symmetric mixing rule
+            // Viscosity:
                     float mu = 0.5 * (fi.viscosity + fj.viscosity);
                     float lap = ViscLaplacian(r, h);
                     float3 dv = pj.vel.xyz - veli;
@@ -322,7 +308,7 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     vel += acc * _TimeStep;
     pos += vel * _TimeStep;
 
-    // Tank-local AABB boundary
+    //Tank Boundary Collisions:
     if (pos.x < _BoundsMinLocal.x)
     {
         pos.x = _BoundsMinLocal.x;
@@ -356,7 +342,7 @@ void Integrate(uint3 id : SV_DispatchThreadID)
         vel.z *= _BoundaryDamping;
     }
 
-    // Optional OBB collisions
+    //Box Boundary Collisions:
     float pr = _ParticleRadius;
     for (uint bi = 0; bi < _BoxCount; ++bi)
     {
@@ -389,13 +375,13 @@ void Integrate(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    // store back
+    //Store Updated Particle Data:
     p.pos.xyz = pos;
     p.vel.xyz = vel;
     p.force.xyz = 0.0.xxx;
     _Particles[i] = p;
 
-    // render outputs
+    //Render Data:
     float4 world = mul(_LocalToWorld, float4(pos, 1.0));
     _Positions[i] = world.xyz;
 

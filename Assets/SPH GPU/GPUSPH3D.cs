@@ -53,20 +53,19 @@ public class GPUSPH3D : MonoBehaviour
     [Header("Render culling bounds")]
     [SerializeField] float renderBoundsMargin = 2f;
 
-    // Buffers
+    //Buffers:
     ComputeBuffer particleBuffer;
     ComputeBuffer positionsBuffer;
-    ComputeBuffer fluidInfoBuffer;   // float2 per particle
+    ComputeBuffer fluidInfoBuffer;   
     ComputeBuffer cellCountsBuffer;
     ComputeBuffer cellIndicesBuffer;
     ComputeBuffer boxesBuffer;
+    ComputeBuffer fluidsBuffer;      
 
-    ComputeBuffer fluidsBuffer;      // FluidParams table
-
-    // Kernels
+    //Kernels:
     int kClearGrid, kBuildGrid, kDensityPressure, kForces, kIntegrate;
 
-    // IDs
+    //IDs:
     static readonly int
         particleCountId = Shader.PropertyToID("_ParticleCount"),
         timeStepId = Shader.PropertyToID("_TimeStep"),
@@ -114,7 +113,7 @@ public class GPUSPH3D : MonoBehaviour
         public float pressure;
         public uint typeId;
         public float mass;
-        public Vector4 pad; // keep stride stable
+        public Vector4 pad;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -156,7 +155,7 @@ public class GPUSPH3D : MonoBehaviour
 
         RecomputeTankLocalBoundsAndGrid();
 
-        // Buffers
+        //Buffers:
         particleBuffer = new ComputeBuffer(particleCapacity, Marshal.SizeOf<ParticleData>());
         positionsBuffer = new ComputeBuffer(particleCapacity, sizeof(float) * 3);
         fluidInfoBuffer = new ComputeBuffer(particleCapacity, sizeof(float) * 2);
@@ -167,25 +166,25 @@ public class GPUSPH3D : MonoBehaviour
         boxesBuffer = new ComputeBuffer(4 * 64, sizeof(float) * 4);
         boxesBuffer.SetData(new Vector4[4 * 64]);
 
-        // Fluids table buffer
+        //Fluids Table Buffer:
         fluidsBuffer = new ComputeBuffer(FluidLibrary.FluidCount, Marshal.SizeOf<FluidParamsGPU>());
         UploadFluidParamsTable();
 
-        // Init buffers
+        //Init Buffers:
         particleBuffer.SetData(new ParticleData[particleCapacity]);
         positionsBuffer.SetData(new Vector3[particleCapacity]);
         fluidInfoBuffer.SetData(new Vector2[particleCapacity]);
         cellCountsBuffer.SetData(new uint[cellCount]);
         cellIndicesBuffer.SetData(new uint[cellCount * maxParticlesPerCell]);
 
-        // Bind all kernels
+        //Bind All Kernels:
         BindCommon(kClearGrid);
         BindCommon(kBuildGrid);
         BindCommon(kDensityPressure);
         BindCommon(kForces);
         BindCommon(kIntegrate);
 
-        // Constants
+        //Constants:
         sphCompute.SetFloat(smoothingRadiusId, smoothingRadius);
         sphCompute.SetFloat(particleRadiusId, particleRadius);
         sphCompute.SetFloat(boundaryDampingId, boundaryDamping);
@@ -198,19 +197,19 @@ public class GPUSPH3D : MonoBehaviour
         sphCompute.SetVector(boundsMinLocalId, tankBoundsMinLocal);
         sphCompute.SetVector(boundsMaxLocalId, tankBoundsMaxLocal);
 
-        // Kernel constants (3D)
+        //Kernel Constants (3D):
         float PI = Mathf.PI;
         float h = smoothingRadius;
         sphCompute.SetFloat(poly6ConstId, 315f / (64f * PI * Mathf.Pow(h, 9)));
         sphCompute.SetFloat(spikyConstId, -45f / (PI * Mathf.Pow(h, 6)));
         sphCompute.SetFloat(viscConstId, 45f / (PI * Mathf.Pow(h, 6)));
 
-        // Rendering binding
+        //Rendering Binding:
         material.SetBuffer(positionsId, positionsBuffer);
         material.SetBuffer(fluidInfoId, fluidInfoBuffer);
         material.SetFloat(stepId, renderStep);
 
-        // Start empty
+        //Start Empty:
         activeCount = 0;
         sphCompute.SetInt(particleCountId, activeCount);
 
@@ -300,7 +299,7 @@ public class GPUSPH3D : MonoBehaviour
             sphCompute.SetInt(boxCountId, 0);
         }
 
-        // Per-step params
+        //Update per-frame Parameters:
         sphCompute.SetFloat(timeStepId, timeStep);
         sphCompute.SetFloat(boundaryDampingId, boundaryDamping);
         sphCompute.SetFloat(particleRadiusId, particleRadius);
@@ -379,7 +378,7 @@ public class GPUSPH3D : MonoBehaviour
 
         float jitter = spacing * 0.05f;
 
-        // Mass uses fluid's rest density * volume (like your CPU version)
+        //Particle Mass:
         var fs = FluidLibrary.Get(fluidType);
         float volume = spacing * spacing * spacing;
         float particleMass = fs.restDensity * volume;
@@ -429,7 +428,7 @@ public class GPUSPH3D : MonoBehaviour
 
         particleBuffer.SetData(list, 0, writeOffset, spawned);
 
-        // Seed positions + fluidInfo so visible immediately
+        //Upload Positions and Fluid Info:
         Vector3[] posArr = new Vector3[spawned];
         Vector2[] infoArr = new Vector2[spawned];
 
@@ -440,7 +439,7 @@ public class GPUSPH3D : MonoBehaviour
         {
             Vector4 pl = list[i].pos;
             posArr[i] = localToWorld.MultiplyPoint3x4(new Vector3(pl.x, pl.y, pl.z));
-            infoArr[i] = new Vector2(typeNorm, 1f); // densityRatio ~1 at spawn
+            infoArr[i] = new Vector2(typeNorm, 1f); 
         }
 
         positionsBuffer.SetData(posArr, 0, writeOffset, spawned);
