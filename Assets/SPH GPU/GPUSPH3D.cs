@@ -283,6 +283,8 @@ public class GPUSPH3D : MonoBehaviour
 
     void Update()
     {
+        if (CustomFluidUI.IsEditingAnyField) return;
+
         if (spawnKeys == null) return;
 
         for (int i = 0; i < spawnKeys.Length; i++)
@@ -556,5 +558,11 @@ public class GPUSPH3D : MonoBehaviour
             Gizmos.DrawWireCube(Vector3.zero, sizeW);
             Gizmos.matrix = old;
         }
+    }
+
+    public void RefreshFluidTableOnGPU()
+    {
+        if (fluidsBuffer == null) return;
+        UploadFluidParamsTable();
     }
 }
