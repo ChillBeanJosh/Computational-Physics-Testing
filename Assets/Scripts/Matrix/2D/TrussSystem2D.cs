@@ -1,4 +1,4 @@
-using System;
+/*using System;
 using System.Collections.Generic;
 using UnityEditor.VersionControl;
 using UnityEngine;
@@ -102,3 +102,4 @@ public class TrussSystem2D : MatrixAssemblyBase
         u = MatrixUtils.SolveSystem(K, f, masses);
     }
 }
+*/
